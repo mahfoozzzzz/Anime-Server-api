@@ -1,9 +1,9 @@
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import json as _json
-from urllib.parse import urljoin, quote
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -124,6 +124,7 @@ def search_anime(keyword):
         response.raise_for_status()
         html = response.json().get("result", {}).get("html", "")
         if not html: return []
+
         soup = BeautifulSoup(html, "html.parser")
         results = []
         for item in soup.find_all("a", class_="aitem"):
@@ -134,10 +135,12 @@ def search_anime(keyword):
             poster = poster_img.get("src", "") if poster_img else ""
             href = item.get("href", "")
             slug = href.replace("/watch/", "") if href.startswith("/watch/") else href
+
             sub, dub, anime_type = "", "", ""
             year = ""
             rating = ""
             total_eps = ""
+
             for span in item.select(".info span"):
                 cls = span.get("class", [])
                 if "sub" in cls: sub = span.get_text(strip=True)
@@ -149,6 +152,7 @@ def search_anime(keyword):
                     if b_tag and text.isdigit(): total_eps = text
                     elif b_tag: anime_type = text
                     else: year = text
+
             if title:
                 results.append({
                     "title": title,
@@ -172,6 +176,7 @@ def scrape_home():
         response = requests.get(ANIMEKAI_HOME_URL, headers=HEADERS, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
+
         banner = []
         for slide in soup.select(".swiper-slide"):
             style = slide.get("style", "")
@@ -213,6 +218,7 @@ def scrape_home():
                     "release": release,
                     "quality": quality,
                 })
+
         latest = []
         for item in soup.select(".aitem-wrapper.regular .aitem"):
             title_tag = item.select_one("a.title")
@@ -231,6 +237,7 @@ def scrape_home():
                     "dub_episodes": dub,
                     "type": anime_type,
                 })
+
         trending = {}
         for tab_id, tab_label in {"trending": "NOW", "day": "DAY", "week": "WEEK", "month": "MONTH"}.items():
             container = soup.select_one(f".aitem-col.top-anime[data-id='{tab_id}']")
@@ -251,6 +258,7 @@ def scrape_home():
                     "type": anime_type,
                 })
             trending[tab_label] = items
+
         return {"banner": banner, "latest_updates": latest, "top_trending": trending}
     except Exception as e:
         return {"error": str(e)}, 500
@@ -261,13 +269,16 @@ def scrape_anime_info(slug):
         response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
+
         ani_id = ""
         sync = soup.select_one("script#syncData")
         if sync:
             try: ani_id = _json.loads(sync.string).get("anime_id", "")
             except: pass
+
         info_el = soup.select_one(".main-entity .info")
         sub, dub, atype = parse_info_spans(info_el)
+
         detail = {}
         for div in soup.select(".detail > div > div"):
             text = div.get_text(separator="|", strip=True)
@@ -276,6 +287,7 @@ def scrape_anime_info(slug):
                 k = k.strip().lower().replace(" ", "_").replace(":", "")
                 links = div.select("span a")
                 detail[k] = [a.get_text(strip=True) for a in links] if links else v.strip().strip("|")
+
         seasons = []
         for s in soup.select(".swiper-wrapper.season .aitem"):
             is_active = "active" in s.get("class", [])
@@ -287,8 +299,10 @@ def scrape_anime_info(slug):
                 "url": f"{ANIMEKAI_URL.rstrip('/')}{s.select_one('a.poster').get('href', '')}" if s.select_one('a.poster') else "",
                 "active": is_active,
             })
+
         bg_el = soup.select_one(".watch-section-bg")
         banner = bg_el.get("style", "").split("url(")[1].split(")")[0] if bg_el and "url(" in bg_el.get("style", "") else ""
+
         return {
             "ani_id": ani_id,
             "title": soup.select_one("h1.title").get_text(strip=True) if soup.select_one("h1.title") else "",
@@ -311,10 +325,12 @@ def fetch_episodes(ani_id):
     try:
         encoded = encode_token(ani_id)
         if not encoded: return {"error": "Token encryption failed"}, 500
+
         response = requests.get(ANIMEKAI_EPISODES_URL, params={"ani_id": ani_id, "_": encoded}, headers=AJAX_HEADERS, timeout=15)
         response.raise_for_status()
         html = response.json().get("result", "")
         if not html: return []
+
         soup = BeautifulSoup(html, "html.parser")
         episodes = []
         for ep in soup.select(".eplist a"):
@@ -336,10 +352,12 @@ def fetch_servers(ep_token):
     try:
         encoded = encode_token(ep_token)
         if not encoded: return {"error": "Token encryption failed"}, 500
+
         response = requests.get(ANIMEKAI_SERVERS_URL, params={"token": ep_token, "_": encoded}, headers=AJAX_HEADERS, timeout=15)
         response.raise_for_status()
         html = response.json().get("result", "")
         soup = BeautifulSoup(html, "html.parser")
+
         servers = {}
         for group in soup.select(".server-items"):
             lang = group.get("data-id", "unknown")
@@ -349,6 +367,7 @@ def fetch_servers(ep_token):
                 "episode_id": s.get("data-eid", ""),
                 "link_id": s.get("data-lid", ""),
             } for s in group.select(".server")]
+
         return {
             "watching": soup.select_one(".server-note p").get_text(strip=True) if soup.select_one(".server-note p") else "",
             "servers": servers
@@ -360,20 +379,25 @@ def resolve_source(link_id):
     try:
         encoded = encode_token(link_id)
         if not encoded: return {"error": "Token encryption failed"}, 500
+
         resp = requests.get(ANIMEKAI_LINKS_VIEW_URL, params={"id": link_id, "_": encoded}, headers=AJAX_HEADERS, timeout=15)
         resp.raise_for_status()
         encrypted_result = resp.json().get("result", "")
+
         embed_data = decode_kai(encrypted_result)
         if not embed_data: return {"error": "Embed decryption failed"}, 500
         embed_url = embed_data.get("url", "")
         if not embed_url: return {"error": "No embed URL found"}, 500
+
         video_id = embed_url.rstrip("/").split("/")[-1]
         embed_base = embed_url.rsplit("/e/", 1)[0] if "/e/" in embed_url else embed_url.rsplit("/", 1)[0]
         media_resp = requests.get(f"{embed_base}/media/{video_id}", headers=HEADERS, timeout=15)
         media_resp.raise_for_status()
         encrypted_media = media_resp.json().get("result", "")
+
         final_data = decode_mega(encrypted_media)
         if not final_data: return {"error": "Media decryption failed"}, 500
+
         return {
             "embed_url": embed_url,
             "skip": embed_data.get("skip", {}),
@@ -384,51 +408,8 @@ def resolve_source(link_id):
     except Exception as e:
         return {"error": str(e)}, 500
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _is_m3u8_url(url: str) -> bool:
-    """True if URL path ends with .m3u8 or contains m3u8 query indicators."""
-    path = url.split("?")[0].lower()
-    return path.endswith(".m3u8") or path.endswith(".m3u")
-
-def _is_segment_url(url: str) -> bool:
-    """True if URL is a media segment (.ts, .m4s, .aac, .mp4, .key)."""
-    path = url.split("?")[0].lower()
-    return any(path.endswith(ext) for ext in (".ts", ".m4s", ".aac", ".mp4", ".fmp4", ".key", ".vtt", ".webvtt"))
-
-def _proxy_base_url(req) -> str:
-    """Returns the base proxy URL for this request (scheme + host)."""
-    return req.host_url.rstrip("/")
-
-def _rewrite_m3u8(content: str, base_url: str, proxy_base: str) -> str:
-    """
-    Rewrites all URLs inside an m3u8 manifest to go through the appropriate
-    proxy endpoint: .m3u8 → /api/proxy/m3u8, segments → /api/proxy/segment
-    """
-    lines = content.splitlines(keepends=True)
-    rewritten = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            rewritten.append(line)
-            continue
-
-        # Resolve to absolute URL
-        if stripped.startswith("http://") or stripped.startswith("https://"):
-            absolute = stripped
-        else:
-            absolute = urljoin(base_url, stripped)
-
-        # Route to correct proxy endpoint
-        if _is_m3u8_url(absolute):
-            rewritten.append(f"{proxy_base}/api/proxy/m3u8?url={quote(absolute, safe='')}\n")
-        else:
-            # Segment, key, subtitle, or anything else
-            rewritten.append(f"{proxy_base}/api/proxy/segment?url={quote(absolute, safe='')}\n")
-
-    return "".join(rewritten)
-
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def index():
@@ -437,22 +418,16 @@ def index():
         "api": "Anime Kai REST API",
         "version": "1.2.0",
         "endpoints": {
-            "/health": "Railway keep-alive ping",
             "/api/home": "Get banner, latest updates, and trending",
             "/api/most-searched": "Get most-searched anime keywords",
             "/api/search?keyword=...": "Search anime",
             "/api/anime/<slug>": "Get anime details and ani_id",
             "/api/episodes/<ani_id>": "Get episode list and ep tokens",
             "/api/servers/<ep_token>": "Get available servers for an episode",
-            "/api/source/<link_id>": "Get direct m3u8 stream and skip times",
-            "/api/proxy/m3u8?url=...": "CORS proxy for HLS manifests",
-            "/api/proxy/segment?url=...": "CORS proxy for HLS segments",
+            "/api/source/<link_id>": "Get direct m3u8 stream (proxied) and skip times",
+            "/proxy?url=...": "Proxy m3u8/ts segments with correct headers"
         }
     })
-
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"})
 
 @app.route("/api/most-searched", methods=["GET"])
 def api_most_searched():
@@ -489,124 +464,83 @@ def api_servers(ep_token):
 @app.route("/api/source/<link_id>", methods=["GET"])
 def api_source(link_id):
     res = resolve_source(link_id)
-    return (jsonify(res), 500) if "error" in res else jsonify({"success": True, **res})
+    if "error" in res:
+        return jsonify(res), 500
 
-@app.route("/api/proxy/m3u8", methods=["GET", "OPTIONS"])
-def proxy_m3u8():
-    """
-    CORS proxy for HLS manifests.
-    Fetches the m3u8, rewrites all child URLs through the correct proxy endpoint,
-    and returns it with Access-Control-Allow-Origin: *.
-    """
-    if request.method == "OPTIONS":
-        resp = Response("", status=204)
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Range"
-        return resp
+    # Wrap each source file through the proxy so segments
+    # get the correct Referer header automatically
+    base_url = request.host_url.rstrip("/")
+    proxied_sources = []
+    for s in res.get("sources", []):
+        raw_url = s.get("file", "")
+        proxied_sources.append({
+            **s,
+            "file": f"{base_url}/proxy?url={requests.utils.quote(raw_url, safe='')}",
+            "raw_url": raw_url,
+        })
 
-    target_url = request.args.get("url", "").strip()
-    if not target_url:
-        return jsonify({"error": "url param required"}), 400
+    return jsonify({"success": True, **res, "sources": proxied_sources})
+
+
+@app.route("/proxy", methods=["GET"])
+def proxy():
+    """
+    Proxies m3u8 playlists and .ts segments, injecting the required
+    Referer/Origin headers that megaup.nl CDN enforces.
+    """
+    url = request.args.get("url", "").strip()
+    if not url:
+        return Response("No URL provided", status=400)
 
     try:
-        resp = requests.get(target_url, headers={
-            "User-Agent": HEADERS["User-Agent"],
-            "Referer": "https://anikai.to/",
-            "Accept": "*/*",
-        }, timeout=20)
-        resp.raise_for_status()
-
-        content = resp.text
-        # Base URL for resolving relative paths in this manifest
-        base_url = target_url.rsplit("/", 1)[0] + "/"
-        proxy_base = _proxy_base_url(request)
-
-        rewritten = _rewrite_m3u8(content, base_url, proxy_base)
-
-        response = Response(
-            response=rewritten,
-            status=200,
-            mimetype="application/vnd.apple.mpegurl",
-        )
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        response.headers["Cache-Control"] = "no-cache"
-        return response
-
-    except requests.exceptions.HTTPError as e:
-        return jsonify({"error": f"Upstream HTTP error: {e.response.status_code}"}), 502
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/proxy/segment", methods=["GET", "OPTIONS"])
-def proxy_segment():
-    """
-    CORS proxy for HLS segments (.ts, .m4s, .key, .vtt, etc.)
-    Streams the response to avoid loading the whole segment into RAM.
-    """
-    if request.method == "OPTIONS":
-        resp = Response("", status=204)
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Range"
-        return resp
-
-    target_url = request.args.get("url", "").strip()
-    if not target_url:
-        return jsonify({"error": "url param required"}), 400
-
-    try:
-        # Forward Range header if present (needed for partial content / seeking)
-        proxy_headers = {
-            "User-Agent": HEADERS["User-Agent"],
-            "Referer": "https://anikai.to/",
-            "Accept": "*/*",
-        }
-        range_header = request.headers.get("Range")
-        if range_header:
-            proxy_headers["Range"] = range_header
+        decoded_url = requests.utils.unquote(url)
 
         upstream = requests.get(
-            target_url,
-            headers=proxy_headers,
-            timeout=30,
+            decoded_url,
+            headers={
+                "Referer": "https://megaup.nl/",
+                "Origin": "https://megaup.nl",
+                "User-Agent": HEADERS["User-Agent"],
+            },
             stream=True,
+            timeout=15,
         )
-        upstream.raise_for_status()
 
-        content_type = upstream.headers.get("Content-Type", "video/MP2T")
-        status_code = upstream.status_code  # 200 or 206 (partial)
+        if not upstream.ok:
+            return Response(f"Upstream error: {upstream.status_code}", status=upstream.status_code)
 
-        def generate():
-            for chunk in upstream.iter_content(chunk_size=65536):
-                if chunk:
-                    yield chunk
+        content_type = upstream.headers.get("Content-Type", "application/octet-stream")
+        base_url = request.host_url.rstrip("/")
 
-        response = Response(
-            response=generate(),
-            status=status_code,
-            mimetype=content_type,
-            direct_passthrough=True,
+        # ── M3U8 playlist: rewrite segment/sub-playlist lines ──
+        if ".m3u8" in decoded_url or "application/vnd.apple.mpegurl" in content_type or "application/x-mpegurl" in content_type:
+            text = upstream.text
+            segment_base = decoded_url[:decoded_url.rfind("/") + 1]
+            lines = []
+            for line in text.split("\n"):
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    abs_url = stripped if stripped.startswith("http") else segment_base + stripped
+                    lines.append(f"{base_url}/proxy?url={requests.utils.quote(abs_url, safe='')}")
+                else:
+                    lines.append(line)
+            return Response(
+                "\n".join(lines),
+                content_type="application/vnd.apple.mpegurl",
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
+        # ── .ts segments and everything else: stream through ──
+        return Response(
+            stream_with_context(upstream.iter_content(chunk_size=8192)),
+            content_type=content_type,
+            headers={"Access-Control-Allow-Origin": "*"},
         )
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        response.headers["Cache-Control"] = "no-cache"
 
-        # Forward Content-Range if upstream sent it (partial content)
-        if "Content-Range" in upstream.headers:
-            response.headers["Content-Range"] = upstream.headers["Content-Range"]
-        if "Content-Length" in upstream.headers:
-            response.headers["Content-Length"] = upstream.headers["Content-Length"]
-
-        return response
-
-    except requests.exceptions.HTTPError as e:
-        return jsonify({"error": f"Upstream HTTP error: {e.response.status_code}"}), 502
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return Response(f"Proxy error: {str(e)}", status=500)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
