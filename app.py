@@ -495,12 +495,18 @@ def proxy():
     try:
         decoded_url = requests.utils.unquote(url)
 
+        from urllib.parse import urlparse as _urlparse
+        _parsed = _urlparse(decoded_url)
+        _origin = f"{_parsed.scheme}://{_parsed.netloc}"
+
         upstream = requests.get(
             decoded_url,
             headers={
-                "Referer": "https://megaup.nl/",
-                "Origin": "https://megaup.nl",
+                "Referer": _origin + "/",
+                "Origin": _origin,
                 "User-Agent": HEADERS["User-Agent"],
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
             },
             stream=True,
             timeout=15,
