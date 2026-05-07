@@ -1,8 +1,9 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import json as _json
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -100,10 +101,8 @@ def scrape_most_searched():
         most_searched_div = soup.find("div", class_="most_searched")
         if not most_searched_div:
             most_searched_div = soup.find("div", class_="most-searched")
-
         if not most_searched_div:
             return {"error": "Could not find most-searched section"}, 404
-
         results = []
         for link in most_searched_div.find_all("a"):
             name = link.get_text(strip=True)
@@ -141,7 +140,7 @@ def search_anime(keyword):
             year = ""
             rating = ""
             total_eps = ""
-            
+
             for span in item.select(".info span"):
                 cls = span.get("class", [])
                 if "sub" in cls: sub = span.get_text(strip=True)
@@ -186,9 +185,7 @@ def scrape_home():
             title = title_tag.get_text(strip=True) if title_tag else ""
             japanese_title = title_tag.get("data-jp", "") if title_tag else ""
             description = slide.select_one("p.desc").get_text(strip=True) if slide.select_one("p.desc") else ""
-            
             sub, dub, anime_type = parse_info_spans(slide.select_one(".info"))
-            
             genres = ""
             info_el = slide.select_one(".info")
             if info_el:
@@ -196,7 +193,6 @@ def scrape_home():
                     if not span.get("class") and not span.find("b"):
                         text = span.get_text(strip=True)
                         if text and not text.isdigit(): genres = text
-
             rating, release, quality = "", "", ""
             mics = slide.select_one(".mics")
             if mics:
@@ -207,7 +203,6 @@ def scrape_home():
                         if lbl == "rating": rating = v.get_text(strip=True)
                         elif lbl == "release": release = v.get_text(strip=True)
                         elif lbl == "quality": quality = v.get_text(strip=True)
-
             if title:
                 banner.append({
                     "title": title,
@@ -230,9 +225,7 @@ def scrape_home():
             href = item.select_one("a.poster").get("href", "") if item.select_one("a.poster") else ""
             episode = href.split("#ep=")[-1] if "#ep=" in href else ""
             href = href.split("#ep=")[0]
-            
             sub, dub, anime_type = parse_info_spans(item.select_one(".info"))
-            
             if title_tag:
                 latest.append({
                     "title": title_tag.get_text(strip=True),
@@ -254,7 +247,6 @@ def scrape_home():
                 style = item.get("style", "")
                 poster = style.split("url(")[1].split(")")[0] if "url(" in style else ""
                 sub, dub, anime_type = parse_info_spans(item.select_one(".info"))
-                
                 items.append({
                     "rank": item.select_one(".num").get_text(strip=True) if item.select_one(".num") else "",
                     "title": item.select_one(".detail .title").get_text(strip=True) if item.select_one(".detail .title") else "",
@@ -286,7 +278,7 @@ def scrape_anime_info(slug):
 
         info_el = soup.select_one(".main-entity .info")
         sub, dub, atype = parse_info_spans(info_el)
-        
+
         detail = {}
         for div in soup.select(".detail > div > div"):
             text = div.get_text(separator="|", strip=True)
@@ -333,7 +325,7 @@ def fetch_episodes(ani_id):
     try:
         encoded = encode_token(ani_id)
         if not encoded: return {"error": "Token encryption failed"}, 500
-        
+
         response = requests.get(ANIMEKAI_EPISODES_URL, params={"ani_id": ani_id, "_": encoded}, headers=AJAX_HEADERS, timeout=15)
         response.raise_for_status()
         html = response.json().get("result", "")
@@ -360,7 +352,7 @@ def fetch_servers(ep_token):
     try:
         encoded = encode_token(ep_token)
         if not encoded: return {"error": "Token encryption failed"}, 500
-        
+
         response = requests.get(ANIMEKAI_SERVERS_URL, params={"token": ep_token, "_": encoded}, headers=AJAX_HEADERS, timeout=15)
         response.raise_for_status()
         html = response.json().get("result", "")
@@ -375,7 +367,7 @@ def fetch_servers(ep_token):
                 "episode_id": s.get("data-eid", ""),
                 "link_id": s.get("data-lid", ""),
             } for s in group.select(".server")]
-        
+
         return {
             "watching": soup.select_one(".server-note p").get_text(strip=True) if soup.select_one(".server-note p") else "",
             "servers": servers
@@ -384,76 +376,47 @@ def fetch_servers(ep_token):
         return {"error": str(e)}, 500
 
 def resolve_source(link_id):
-    import traceback
     try:
         encoded = encode_token(link_id)
-        if not encoded:
-            return {"error": "Token encryption failed"}
+        if not encoded: return {"error": "Token encryption failed"}, 500
 
         resp = requests.get(ANIMEKAI_LINKS_VIEW_URL, params={"id": link_id, "_": encoded}, headers=AJAX_HEADERS, timeout=15)
         resp.raise_for_status()
-        raw_json = resp.json()
-        print(f"[DEBUG] links/view keys: {list(raw_json.keys()) if isinstance(raw_json, dict) else type(raw_json).__name__}", flush=True)
-        encrypted_result = raw_json.get("result", "")
-        print(f"[DEBUG] encrypted_result type={type(encrypted_result).__name__} preview={str(encrypted_result)[:80]}", flush=True)
+        encrypted_result = resp.json().get("result", "")
 
         embed_data = decode_kai(encrypted_result)
-        print(f"[DEBUG] decode_kai type={type(embed_data).__name__} value={str(embed_data)[:200]}", flush=True)
-        if not embed_data:
-            return {"error": "Embed decryption failed"}
-
-        if isinstance(embed_data, str):
-            embed_url = embed_data
-            skip_data = {}
-        elif isinstance(embed_data, dict):
-            embed_url = embed_data.get("url", "") or embed_data.get("link", "") or embed_data.get("src", "") or embed_data.get("stream", "")
-            skip_data = embed_data.get("skip", {})
-            if not embed_url:
-                return {"error": f"No embed URL. embed_data keys={list(embed_data.keys())} value={str(embed_data)[:150]}"}
-        else:
-            return {"error": f"decode_kai unexpected type: {type(embed_data).__name__} value={str(embed_data)[:100]}"}
-
-        print(f"[DEBUG] embed_url={embed_url}", flush=True)
+        if not embed_data: return {"error": "Embed decryption failed"}, 500
+        embed_url = embed_data.get("url", "")
+        if not embed_url: return {"error": "No embed URL found"}, 500
 
         video_id = embed_url.rstrip("/").split("/")[-1]
         embed_base = embed_url.rsplit("/e/", 1)[0] if "/e/" in embed_url else embed_url.rsplit("/", 1)[0]
-        media_url = f"{embed_base}/media/{video_id}"
-        print(f"[DEBUG] media_url={media_url}", flush=True)
-
-        media_resp = requests.get(media_url, headers=HEADERS, timeout=15)
+        media_resp = requests.get(f"{embed_base}/media/{video_id}", headers=HEADERS, timeout=15)
         media_resp.raise_for_status()
-        media_json = media_resp.json()
-        print(f"[DEBUG] media_json keys={list(media_json.keys()) if isinstance(media_json, dict) else type(media_json).__name__}", flush=True)
-        encrypted_media = media_json.get("result", "")
+        encrypted_media = media_resp.json().get("result", "")
 
         final_data = decode_mega(encrypted_media)
-        print(f"[DEBUG] decode_mega type={type(final_data).__name__} value={str(final_data)[:200]}", flush=True)
-        if not final_data:
-            return {"error": "Media decryption failed"}
-
-        if not isinstance(final_data, dict):
-            return {"error": f"decode_mega unexpected type={type(final_data).__name__} value={str(final_data)[:100]}"}
-
-        sources = final_data.get("sources", [])
-        print(f"[DEBUG] sources count={len(sources)}", flush=True)
+        if not final_data: return {"error": "Media decryption failed"}, 500
 
         return {
             "embed_url": embed_url,
-            "skip": skip_data,
-            "sources": sources,
+            "skip": embed_data.get("skip", {}),
+            "sources": final_data.get("sources", []),
             "tracks": final_data.get("tracks", []),
             "download": final_data.get("download", ""),
         }
     except Exception as e:
-        print(f"[ERROR] resolve_source: {traceback.format_exc()}", flush=True)
-        return {"error": str(e)}
+        return {"error": str(e)}, 500
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def index():
     return jsonify({
         "success": True,
         "api": "Anime Kai REST API",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "endpoints": {
             "/api/home": "Get banner, latest updates, and trending",
             "/api/most-searched": "Get most-searched anime keywords",
@@ -461,7 +424,8 @@ def index():
             "/api/anime/<slug>": "Get anime details and ani_id",
             "/api/episodes/<ani_id>": "Get episode list and ep tokens",
             "/api/servers/<ep_token>": "Get available servers for an episode",
-            "/api/source/<link_id>": "Get direct m3u8 stream and skip times"
+            "/api/source/<link_id>": "Get direct m3u8 stream (proxied) and skip times",
+            "/proxy?url=...": "Proxy m3u8/ts segments with correct headers"
         }
     })
 
@@ -500,23 +464,14 @@ def api_servers(ep_token):
 @app.route("/api/source/<link_id>", methods=["GET"])
 def api_source(link_id):
     res = resolve_source(link_id)
-    # Safety: resolve_source should always return plain dict, but guard anyway
-    if isinstance(res, tuple):
-        res = res[0]
-    if not isinstance(res, dict):
-        return jsonify({"error": "Unexpected resolver response"}), 500
     if "error" in res:
         return jsonify(res), 500
 
-    sources = res.get("sources", [])
-    if not isinstance(sources, list):
-        return jsonify({"error": f"Sources is not a list, got: {type(sources).__name__}"}), 500
-
+    # Wrap each source file through the proxy so segments
+    # get the correct Referer header automatically
     base_url = request.host_url.rstrip("/")
     proxied_sources = []
-    for s in sources:
-        if not isinstance(s, dict):
-            continue
+    for s in res.get("sources", []):
         raw_url = s.get("file", "")
         proxied_sources.append({
             **s,
@@ -526,14 +481,20 @@ def api_source(link_id):
 
     return jsonify({"success": True, **res, "sources": proxied_sources})
 
+
 @app.route("/proxy", methods=["GET"])
 def proxy():
-    from flask import Response, stream_with_context
+    """
+    Proxies m3u8 playlists and .ts segments, injecting the required
+    Referer/Origin headers that megaup.nl CDN enforces.
+    """
     url = request.args.get("url", "").strip()
     if not url:
         return Response("No URL provided", status=400)
+
     try:
         decoded_url = requests.utils.unquote(url)
+
         upstream = requests.get(
             decoded_url,
             headers={
@@ -544,13 +505,15 @@ def proxy():
             stream=True,
             timeout=15,
         )
+
         if not upstream.ok:
             return Response(f"Upstream error: {upstream.status_code}", status=upstream.status_code)
 
         content_type = upstream.headers.get("Content-Type", "application/octet-stream")
         base_url = request.host_url.rstrip("/")
 
-        if ".m3u8" in decoded_url or "mpegurl" in content_type:
+        # ── M3U8 playlist: rewrite segment/sub-playlist lines ──
+        if ".m3u8" in decoded_url or "application/vnd.apple.mpegurl" in content_type or "application/x-mpegurl" in content_type:
             text = upstream.text
             segment_base = decoded_url[:decoded_url.rfind("/") + 1]
             lines = []
@@ -567,16 +530,17 @@ def proxy():
                 headers={"Access-Control-Allow-Origin": "*"},
             )
 
+        # ── .ts segments and everything else: stream through ──
         return Response(
             stream_with_context(upstream.iter_content(chunk_size=8192)),
             content_type=content_type,
             headers={"Access-Control-Allow-Origin": "*"},
         )
+
     except Exception as e:
         return Response(f"Proxy error: {str(e)}", status=500)
 
 
-import os
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
