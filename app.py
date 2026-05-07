@@ -378,16 +378,25 @@ def fetch_servers(ep_token):
 def resolve_source(link_id):
     try:
         encoded = encode_token(link_id)
-        if not encoded: return {"error": "Token encryption failed"}, 500
+        if not encoded:
+            return {"error": "Token encryption failed"}
 
         resp = requests.get(ANIMEKAI_LINKS_VIEW_URL, params={"id": link_id, "_": encoded}, headers=AJAX_HEADERS, timeout=15)
         resp.raise_for_status()
         encrypted_result = resp.json().get("result", "")
 
         embed_data = decode_kai(encrypted_result)
-        if not embed_data: return {"error": "Embed decryption failed"}, 500
-        embed_url = embed_data.get("url", "")
-        if not embed_url: return {"error": "No embed URL found"}, 500
+        if not embed_data:
+            return {"error": "Embed decryption failed"}
+        # decode_kai may return a string (URL) or a dict depending on the API
+        if isinstance(embed_data, str):
+            embed_url = embed_data
+            skip_data = {}
+        else:
+            embed_url = embed_data.get("url", "")
+            skip_data = embed_data.get("skip", {})
+        if not embed_url:
+            return {"error": "No embed URL found"}
 
         video_id = embed_url.rstrip("/").split("/")[-1]
         embed_base = embed_url.rsplit("/e/", 1)[0] if "/e/" in embed_url else embed_url.rsplit("/", 1)[0]
@@ -396,17 +405,22 @@ def resolve_source(link_id):
         encrypted_media = media_resp.json().get("result", "")
 
         final_data = decode_mega(encrypted_media)
-        if not final_data: return {"error": "Media decryption failed"}, 500
+        if not final_data:
+            return {"error": "Media decryption failed"}
+
+        # final_data may also be a string or unexpected type — guard it
+        if not isinstance(final_data, dict):
+            return {"error": f"Unexpected media data type: {type(final_data).__name__}"}
 
         return {
             "embed_url": embed_url,
-            "skip": embed_data.get("skip", {}),
+            "skip": skip_data,
             "sources": final_data.get("sources", []),
             "tracks": final_data.get("tracks", []),
             "download": final_data.get("download", ""),
         }
     except Exception as e:
-        return {"error": str(e)}, 500
+        return {"error": str(e)}
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
@@ -464,14 +478,28 @@ def api_servers(ep_token):
 @app.route("/api/source/<link_id>", methods=["GET"])
 def api_source(link_id):
     res = resolve_source(link_id)
+
+    # Guard: resolve_source should always return a dict now, but be safe
+    if isinstance(res, tuple):
+        res = res[0]
+
+    if not isinstance(res, dict):
+        return jsonify({"error": "Unexpected resolver response"}), 500
+
     if "error" in res:
         return jsonify(res), 500
+
+    sources = res.get("sources", [])
+    if not isinstance(sources, list):
+        return jsonify({"error": f"Sources is not a list, got: {type(sources).__name__}"}), 500
 
     # Wrap each source file through the proxy so segments
     # get the correct Referer header automatically
     base_url = request.host_url.rstrip("/")
     proxied_sources = []
-    for s in res.get("sources", []):
+    for s in sources:
+        if not isinstance(s, dict):
+            continue
         raw_url = s.get("file", "")
         proxied_sources.append({
             **s,
